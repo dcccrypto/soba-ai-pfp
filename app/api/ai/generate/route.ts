@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Replicate from 'replicate';
-import { createGenerationRecord, updateGenerationQuota, getGenerationQuota } from '@/lib/server/postgres';
+import { createGenerationRecord, updateGenerationQuota, getGenerationQuota, createGenerationQuota } from '@/lib/server/postgres';
 
 const replicate = new Replicate({
   auth: process.env.REPLICATE_API_TOKEN,
@@ -29,12 +29,27 @@ export async function POST(req: NextRequest) {
     }
 
     // Check user quota
-    const quota = await getGenerationQuota(userId);
-    if (!quota) {
+    let quota;
+    try {
+      quota = await getGenerationQuota(userId);
+    } catch (error) {
+      console.error('Error getting quota:', error);
       return NextResponse.json(
-        { error: 'User quota not found' },
-        { status: 404 }
+        { error: 'Failed to check generation quota' },
+        { status: 500 }
       );
+    }
+
+    if (!quota) {
+      try {
+        quota = await createGenerationQuota(userId);
+      } catch (error) {
+        console.error('Error creating quota:', error);
+        return NextResponse.json(
+          { error: 'Failed to create generation quota' },
+          { status: 500 }
+        );
+      }
     }
 
     if (quota.generations_today >= MAX_DAILY_GENERATIONS) {
@@ -47,7 +62,7 @@ export async function POST(req: NextRequest) {
     // Generate image using Replicate
     try {
       const output = await replicate.run(
-        "stability-ai/sdxl:2b017d9b67edd2ee1401238df49d75da53c523f36e363881e057f5dc3ed3c5b2",
+        "dcccrypto/soba:e0e293b97de2af9d7ad1851c13b14e01036fa7040b6dd39eec05d18f76dcc997",
         {
           input: {
             prompt,
@@ -56,7 +71,6 @@ export async function POST(req: NextRequest) {
         }
       );
 
-      // The output will be an array with the image URL
       const imageUrl = Array.isArray(output) ? output[0] : output;
 
       if (!imageUrl) {
@@ -75,7 +89,7 @@ export async function POST(req: NextRequest) {
         userId,
         prompt,
         imageUrl,
-        "stability-ai/sdxl:2b017d9b67edd2ee1401238df49d75da53c523f36e363881e057f5dc3ed3c5b2",
+        "dcccrypto/soba:e0e293b97de2af9d7ad1851c13b14e01036fa7040b6dd39eec05d18f76dcc997",
         params || {}
       );
 

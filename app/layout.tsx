@@ -1,6 +1,7 @@
 import './globals.css';
 import { Providers } from './providers';
 import { WalletInit } from '@/components/wallet/WalletInit';
+import { Navigation } from './components/Navigation';
 
 export const metadata = {
   title: 'Soba AI PFP',
@@ -17,6 +18,7 @@ export default function RootLayout({
       <body>
         <Providers>
           <WalletInit />
+          <Navigation />
           {children}
         </Providers>
       </body>

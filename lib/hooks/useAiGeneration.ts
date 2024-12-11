@@ -1,38 +1,31 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState } from 'react';
 import { useWalletContext } from '../context/WalletContext';
 import { GenerationParams, GenerationResult } from '../types/ai';
-import toast from 'react-hot-toast';
+import { updateUserStats } from '../server/postgres';
 
-export const useAiGeneration = () => {
-  const { publicKey, hasMinBalance } = useWalletContext();
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [generationError, setGenerationError] = useState<string | null>(null);
+export function useAiGeneration() {
+  const { publicKey } = useWalletContext();
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const generateImage = useCallback(async (
-    prompt: string,
-    params?: Partial<GenerationParams>
-  ): Promise<GenerationResult | null> => {
+  const generate = async (prompt: string, params?: GenerationParams): Promise<GenerationResult | null> => {
     if (!publicKey) {
-      toast.error('Please connect your wallet first');
+      setError('Wallet not connected');
       return null;
     }
 
-    if (!hasMinBalance) {
-      toast.error('Insufficient SOBA token balance');
-      return null;
-    }
+    setIsLoading(true);
+    setError(null);
 
     try {
-      setIsGenerating(true);
-      setGenerationError(null);
-
-      console.log('Sending generation request:', {
-        prompt,
-        params,
-        userId: publicKey.toString(),
-      });
+      // Check if server is running first
+      try {
+        await fetch('/api/health');
+      } catch (e) {
+        throw new Error('API server is not running. Please start the development server with `npm run dev`');
+      }
 
       const response = await fetch('/api/ai/generate', {
         method: 'POST',
@@ -42,57 +35,58 @@ export const useAiGeneration = () => {
         body: JSON.stringify({
           prompt,
           params,
-          userId: publicKey.toString(),
+          userId: publicKey.toBase58(),
         }),
       });
 
       const data = await response.json();
 
       if (!response.ok) {
-        console.error('Generation failed:', data);
-        throw new Error(data.error || 'Failed to generate image');
+        throw new Error(data.error || 'Generation failed');
       }
 
-      console.log('Generation successful:', data);
-      toast.success('Image generated successfully!');
-      return data;
-    } catch (error) {
-      console.error('Generation error:', error);
-      const message = error instanceof Error ? error.message : 'Failed to generate image';
-      setGenerationError(message);
-      toast.error(message);
+      if (data.success && data.imageUrl) {
+        // Update user stats after successful generation
+        try {
+          const statsResponse = await fetch('/api/user/update-stats', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              userId: publicKey.toBase58(),
+              incrementUsed: 1,
+            }),
+          });
+
+          if (!statsResponse.ok) {
+            console.warn('Failed to update user stats:', await statsResponse.text());
+          }
+        } catch (statsError) {
+          console.warn('Failed to update user stats:', statsError);
+        }
+
+        return {
+          success: true,
+          imageUrl: data.imageUrl,
+          params: data.params,
+        };
+      }
+
+      throw new Error(data.error || 'Generation failed');
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+      console.error('Generation error:', err);
+      setError(errorMessage);
       return null;
     } finally {
-      setIsGenerating(false);
+      setIsLoading(false);
     }
-  }, [publicKey, hasMinBalance]);
-
-  const checkQuota = useCallback(async (): Promise<{
-    generationsToday: number;
-    remainingToday: number;
-    totalGenerations: number;
-  } | null> => {
-    if (!publicKey) return null;
-
-    try {
-      const response = await fetch(`/api/ai/generate?userId=${publicKey.toString()}`);
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to check quota');
-      }
-
-      return data;
-    } catch (error) {
-      console.error('Error checking quota:', error);
-      return null;
-    }
-  }, [publicKey]);
+  };
 
   return {
-    generateImage,
-    checkQuota,
-    isGenerating,
-    generationError,
+    generate,
+    isLoading,
+    error,
   };
-}; 
+} 

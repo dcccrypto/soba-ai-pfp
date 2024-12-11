@@ -1,10 +1,16 @@
-import { Pool, PoolConfig } from 'pg';
+import { createClient } from '@supabase/supabase-js';
+import { Pool } from 'pg';
 import { config } from '../config';
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
 
 const DEFAULT_DAILY_QUOTA = 10;
 
 // Database configuration
-const DB_CONFIG: PoolConfig = {
+const DB_CONFIG = {
   connectionString: process.env.POSTGRES_URL || config.supabase.url,
   ssl: {
     rejectUnauthorized: false
@@ -192,89 +198,68 @@ export interface GenerationRecord {
   updated_at: Date;
 }
 
-export async function getGenerationQuota(userId: string): Promise<GenerationQuota | null> {
-  console.log(`[DB] Getting generation quota for user: ${userId}`);
-  const startTime = Date.now();
-
+export async function getGenerationQuota(userId: string) {
   try {
-    const result = await DatabasePool.query(
-      `SELECT generations_today, total_generations, last_generation_date,
-              total_generations as quota, generations_today as used 
-       FROM generation_quotas 
-       WHERE user_id = $1`,
-      [userId]
-    );
+    const { data, error } = await supabase
+      .from('generation_quotas')
+      .select('*')
+      .eq('user_id', userId)
+      .single();
 
-    const duration = Date.now() - startTime;
-    console.log(`[DB] Got quota in ${duration}ms:`, result.rows[0] || 'null');
-
-    if (result.rows.length === 0) {
-      return null;
+    if (error && error.code === 'PGRST116') {
+      // If no quota exists, create one
+      return createGenerationQuota(userId);
     }
 
-    return result.rows[0];
+    if (error) throw error;
+    return data;
   } catch (err) {
     console.error('[DB] Error getting generation quota:', err);
     throw err;
   }
 }
 
-export async function createGenerationQuota(userId: string): Promise<GenerationQuota> {
+export async function createGenerationQuota(userId: string) {
   console.log(`[DB] Creating generation quota for user: ${userId}`);
-  const startTime = Date.now();
-
+  
   try {
-    const result = await DatabasePool.query(
-      `INSERT INTO generation_quotas 
-       (user_id, generations_today, total_generations, last_generation_date)
-       VALUES ($1, 0, $2, NOW())
-       RETURNING generations_today, total_generations, last_generation_date,
-                 total_generations as quota, generations_today as used`,
-      [userId, DEFAULT_DAILY_QUOTA]
-    );
+    const { data, error } = await supabase
+      .from('generation_quotas')
+      .insert([{
+        user_id: userId,
+        generations_today: 0,
+        total_generations: 0,
+        last_generation_date: new Date().toISOString()
+      }])
+      .select()
+      .single();
 
-    const duration = Date.now() - startTime;
-    console.log(`[DB] Created quota in ${duration}ms:`, result.rows[0]);
-
-    return result.rows[0];
+    if (error) throw error;
+    return data;
   } catch (err) {
     console.error('[DB] Error creating generation quota:', err);
     throw err;
   }
 }
 
-export async function updateGenerationQuota(
-  userId: string, 
-  generationsToday: number, 
-  totalGenerations: number
-): Promise<GenerationQuota> {
-  console.log(`[DB] Updating generation quota for user: ${userId}`, {
-    generationsToday,
-    totalGenerations
-  });
-  const startTime = Date.now();
-
+export async function updateGenerationQuota(userId: string, generationsToday: number, totalGenerations: number) {
   try {
-    const result = await DatabasePool.query(
-      `UPDATE generation_quotas 
-       SET generations_today = $2,
-           total_generations = $3,
-           last_generation_date = NOW(),
-           updated_at = NOW()
-       WHERE user_id = $1
-       RETURNING generations_today, total_generations, last_generation_date,
-                 total_generations as quota, generations_today as used`,
-      [userId, generationsToday, totalGenerations]
-    );
+    const { data, error } = await supabase
+      .from('generation_quotas')
+      .upsert({
+        user_id: userId,
+        generations_today: generationsToday,
+        total_generations: totalGenerations,
+        last_generation_date: new Date().toISOString()
+      }, {
+        onConflict: 'user_id',
+        ignoreDuplicates: false
+      })
+      .select()
+      .single();
 
-    if (result.rows.length === 0) {
-      throw new Error('User quota not found');
-    }
-
-    const duration = Date.now() - startTime;
-    console.log(`[DB] Updated quota in ${duration}ms:`, result.rows[0]);
-
-    return result.rows[0];
+    if (error) throw error;
+    return data;
   } catch (err) {
     console.error('[DB] Error updating generation quota:', err);
     throw err;
@@ -287,29 +272,23 @@ export async function createGenerationRecord(
   imageUrl: string,
   modelVersion: string,
   params: any
-): Promise<GenerationRecord> {
-  console.log(`[DB] Creating generation record for user: ${userId}`, {
-    prompt: prompt.substring(0, 50) + (prompt.length > 50 ? '...' : ''),
-    modelVersion
-  });
-  const startTime = Date.now();
-
+) {
   try {
-    const result = await DatabasePool.query(
-      `INSERT INTO generation_records 
-       (user_id, prompt, image_url, status, model_version, generation_params)
-       VALUES ($1, $2, $3, 'completed', $4, $5)
-       RETURNING *`,
-      [userId, prompt, imageUrl, modelVersion, params]
-    );
+    const { data, error } = await supabase
+      .from('generation_records')
+      .insert([{
+        user_id: userId,
+        prompt,
+        image_url: imageUrl,
+        status: 'completed',
+        model_version: modelVersion,
+        generation_params: params
+      }])
+      .select()
+      .single();
 
-    const duration = Date.now() - startTime;
-    console.log(`[DB] Created record in ${duration}ms:`, {
-      id: result.rows[0].id,
-      status: result.rows[0].status
-    });
-
-    return result.rows[0];
+    if (error) throw error;
+    return data;
   } catch (err) {
     console.error('[DB] Error creating generation record:', err);
     throw err;
@@ -358,3 +337,33 @@ export const executeWithRetry = async <T>(
   }
   throw lastError;
 };
+
+export async function updateUserStats(
+  userId: string,
+  updates: { incrementUsed?: number }
+) {
+  const startTime = Date.now();
+  console.log('[DB] Updating user stats for:', userId);
+
+  try {
+    const result = await DatabasePool.query(
+      `
+      UPDATE user_stats 
+      SET 
+        used = used + $2,
+        updated_at = NOW()
+      WHERE user_id = $1
+      RETURNING *
+      `,
+      [userId, updates.incrementUsed || 0]
+    );
+
+    const duration = Date.now() - startTime;
+    console.log(`[DB] Updated user stats in ${duration}ms`);
+
+    return result.rows[0];
+  } catch (err) {
+    console.error('[DB] Error updating user stats:', err);
+    throw err;
+  }
+}
